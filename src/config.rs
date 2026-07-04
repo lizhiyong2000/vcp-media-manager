@@ -53,6 +53,7 @@ fn default_servers_from_env() -> ServersConfig {
                 .unwrap_or_else(|_| "127.0.0.1".to_string()),
             rtmp_port: 1935,
             rtsp_port: 554,
+            webrtc_port: 9080,
         }],
     }
 }

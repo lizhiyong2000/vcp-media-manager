@@ -13,7 +13,8 @@
       "apiUrl": "http://127.0.0.1:8081",
       "publicHost": "127.0.0.1",
       "rtmpPort": 1935,
-      "rtspPort": 554
+      "rtspPort": 554,
+      "webrtcPort": 9080
     }
   ]
 }

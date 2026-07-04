@@ -17,5 +17,6 @@ pub fn build_play_urls(server: &MediaServerInstance, stream_id: &str) -> PlayUrl
             "http://{host}:{}/webrtc/webrtc-test.html",
             server.http_port()
         ),
+        webrtc_signaling_url: format!("ws://{host}:{}/", server.webrtc_port),
     }
 }

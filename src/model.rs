@@ -16,6 +16,12 @@ pub struct MediaServerInstance {
     pub public_host: String,
     pub rtmp_port: u16,
     pub rtsp_port: u16,
+    #[serde(default = "default_webrtc_port")]
+    pub webrtc_port: u16,
+}
+
+fn default_webrtc_port() -> u16 {
+    9080
 }
 
 impl MediaServerInstance {
@@ -66,6 +72,7 @@ pub struct PlayUrls {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hls: Option<String>,
     pub webrtc_test_page: String,
+    pub webrtc_signaling_url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
