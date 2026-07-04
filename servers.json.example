@@ -1,0 +1,19 @@
+{
+  "regions": [
+    {
+      "id": "default",
+      "name": "默认区域"
+    }
+  ],
+  "servers": [
+    {
+      "id": "default-01",
+      "regionId": "default",
+      "name": "本地节点",
+      "apiUrl": "http://127.0.0.1:8081",
+      "publicHost": "127.0.0.1",
+      "rtmpPort": 1935,
+      "rtspPort": 554
+    }
+  ]
+}
