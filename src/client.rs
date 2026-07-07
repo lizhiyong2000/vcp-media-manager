@@ -128,7 +128,7 @@ impl MediaServerClient {
     }
 
     pub async fn play_urls(&self, stream_id: &str) -> Result<PlayUrlsResponse, UpstreamError> {
-        let path = format!("/api/play-urls/{}", stream_id);
+        let path = format!("/api/play-urls/{}", url_encode_component(stream_id));
         let (_, value) = self.request_json(Method::GET, &path, None).await?;
         serde_json::from_value(value)
             .map_err(|e| UpstreamError {
@@ -178,6 +178,59 @@ impl MediaServerClient {
                 body: format!("failed to parse sessions: {e}"),
             })
     }
+
+    /// Submit a snapshot request for the given stream
+    pub async fn capture_snapshot(&self, stream_id: &str) -> Result<Value, UpstreamError> {
+        let body = serde_json::json!({ "stream_id": stream_id });
+        self.request_json(Method::POST, "/api/snapshot", Some(body))
+            .await
+            .map(|(_, v)| v)
+    }
+
+    /// List all snapshots, optionally filtered by stream_id
+    pub async fn list_snapshots(&self, stream_id: Option<&str>) -> Result<Value, UpstreamError> {
+        let path = match stream_id {
+            Some(id) => format!("/api/snapshots?stream_id={}", url_encode_component(id)),
+            None => "/api/snapshots".to_string(),
+        };
+        self.request_json(Method::GET, &path, None)
+            .await
+            .map(|(_, v)| v)
+    }
+
+    /// Get a single snapshot entry (JSON)
+    pub async fn get_snapshot_entry(&self, id: &str) -> Result<Value, UpstreamError> {
+        let path = format!("/api/snapshots/{}", url_encode_component(id));
+        self.request_json(Method::GET, &path, None)
+            .await
+            .map(|(_, v)| v)
+    }
+
+    /// Retrieve the raw JPEG image bytes for a snapshot
+    pub async fn get_snapshot_image_bytes(&self, id: &str) -> Result<(Vec<u8>, String), UpstreamError> {
+        let url = format!("{}/api/snapshots/{}.jpg", self.base_url, url_encode_component(id));
+        let response = self.http.get(&url).send().await.map_err(|err| UpstreamError {
+            status: StatusCode::BAD_GATEWAY,
+            body: format!("cannot reach media server at {}: {err}", self.base_url),
+        })?;
+
+        let status =
+            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let bytes = response.bytes().await.unwrap_or_default().to_vec();
+
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes).to_string();
+            return Err(UpstreamError { status, body });
+        }
+
+        Ok((bytes, content_type))
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -186,4 +239,23 @@ fn normalize_path(path: &str) -> String {
     } else {
         format!("/{path}")
     }
+}
+
+/// Percent-encode a string for safe use in URL path segments and query values.
+/// Allows unreserved chars (A-Z, a-z, 0-9, - . _ ~), encodes everything else
+/// including multi-byte UTF-8 sequences like Chinese characters.
+fn url_encode_component(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(*byte as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(result, "%{:02X}", byte);
+            }
+        }
+    }
+    result
 }

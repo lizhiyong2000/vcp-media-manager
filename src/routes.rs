@@ -1,5 +1,8 @@
 use axum::{
+    body::Bytes,
     extract::{Path, State},
+    http::header,
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };
@@ -37,10 +40,16 @@ pub fn api_router() -> Router<AppState> {
         .route("/metrics", get(get_metrics))
         .route("/pull/rtmp", axum::routing::post(pull_rtmp))
         .route("/pull/rtsp", axum::routing::post(pull_rtsp))
+        .route("/pull/hls", axum::routing::post(pull_hls))
+        .route("/pull/flv", axum::routing::post(pull_flv))
         .route("/play-urls/:id", get(get_play_urls_legacy))
         .route("/transcode/start", axum::routing::post(start_transcode))
         .route("/transcode/stop", axum::routing::post(stop_transcode))
         .route("/transcode", get(list_transcode_sessions))
+        .route("/snapshot", axum::routing::post(capture_snapshot_route))
+        .route("/snapshots", get(list_snapshots_route))
+        .route("/snapshots/:id", get(get_snapshot_entry_route))
+        .route("/snapshot-image/:snapshot_id", get(get_snapshot_image_route))
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -451,7 +460,7 @@ async fn list_streams(State(state): State<AppState>) -> (StatusCode, Json<serde_
 
 async fn get_stream(State(state): State<AppState>, Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(device) = state.devices.get(&id).await {
-        let path = format!("/api/stream/{}", device.id);
+        let path = format!("/api/stream/{}", url_encode_component(&device.id));
         if let Some(client) = state.registry.get_client(&device.server_id) {
             match client.request_json(axum::http::Method::GET, &path, None).await {
                 Ok((status, mut value)) if status.is_success() => {
@@ -475,7 +484,7 @@ async fn get_stream(State(state): State<AppState>, Path(id): Path<String>) -> (S
         let Some(client) = state.registry.get_client(&server.id) else {
             continue;
         };
-        let path = format!("/api/stream/{id}");
+        let path = format!("/api/stream/{}", url_encode_component(&id));
         if let Ok((status, mut value)) = client.request_json(axum::http::Method::GET, &path, None).await {
             if status.is_success() {
                 value["playUrls"] =
@@ -515,7 +524,7 @@ async fn create_stream(
 async fn delete_stream(State(state): State<AppState>, Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(device) = state.devices.get(&id).await {
         if let Some(client) = state.registry.get_client(&device.server_id) {
-            let path = format!("/api/stream/{id}");
+            let path = format!("/api/stream/{}", url_encode_component(&id));
             return match client
                 .request_json(axum::http::Method::DELETE, &path, None)
                 .await
@@ -529,7 +538,7 @@ async fn delete_stream(State(state): State<AppState>, Path(id): Path<String>) ->
         let Some(client) = state.registry.get_client(&server.id) else {
             continue;
         };
-        let path = format!("/api/stream/{id}");
+        let path = format!("/api/stream/{}", url_encode_component(&id));
         if let Ok((status, value)) = client.request_json(axum::http::Method::DELETE, &path, None).await {
             if status.is_success() {
                 return (status, Json(value));
@@ -563,6 +572,14 @@ async fn get_metrics(State(state): State<AppState>) -> (StatusCode, Json<serde_j
 
 async fn pull_rtmp(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
     route_pull(&state, body, "/api/rtmp/pull").await
+}
+
+async fn pull_hls(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
+    route_pull(&state, body, "/api/pull/hls").await
+}
+
+async fn pull_flv(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
+    route_pull(&state, body, "/api/pull/flv").await
 }
 
 async fn pull_rtsp(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
@@ -657,6 +674,25 @@ fn not_found(message: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::NOT_FOUND,
         Json(json!({ "error": message.to_string() })),
     )
+}
+
+/// Percent-encode a string for safe use in URL path segments.
+/// Allows unreserved chars (A-Z, a-z, 0-9, - . _ ~), encodes everything else
+/// including multi-byte UTF-8 sequences like Chinese characters.
+fn url_encode_component(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(*byte as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(result, "%{:02X}", byte);
+            }
+        }
+    }
+    result
 }
 
 #[derive(Deserialize)]
@@ -797,4 +833,133 @@ async fn list_transcode_sessions(State(state): State<AppState>) -> (StatusCode, 
         }
     }
     (StatusCode::OK, Json(json!({ "sessions": all_sessions, "count": all_sessions.len() })))
+}
+
+// --- snapshot proxy ---
+
+#[derive(Deserialize)]
+struct CaptureSnapshotRequest {
+    #[serde(alias = "streamId")]
+    stream_id: String,
+}
+
+async fn capture_snapshot_route(
+    State(state): State<AppState>,
+    Json(body): Json<CaptureSnapshotRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let stream_id = &body.stream_id;
+    if let Some(device) = state.devices.get(stream_id).await {
+        if let Some(client) = state.registry.get_client(&device.server_id) {
+            return match client.capture_snapshot(&device.id).await {
+                Ok(value) => (StatusCode::ACCEPTED, Json(value)),
+                Err(e) => (e.status, Json(json!({ "error": e.body }))),
+            };
+        }
+    }
+    let Some(server) = state.registry.list_servers().first().copied() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no media server configured" })),
+        );
+    };
+    let Some(client) = state.registry.get_client(&server.id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "media server client unavailable" })),
+        );
+    };
+    // Find the stream on the first server
+    match client.capture_snapshot(stream_id).await {
+        Ok(value) => (StatusCode::ACCEPTED, Json(value)),
+        Err(e) => (e.status, Json(json!({ "error": e.body }))),
+    }
+}
+
+async fn list_snapshots_route(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(server) = state.registry.list_servers().first().copied() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no media server configured" })),
+        );
+    };
+    let Some(client) = state.registry.get_client(&server.id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "media server client unavailable" })),
+        );
+    };
+    match client.list_snapshots(None).await {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(e) => (e.status, Json(json!({ "error": e.body }))),
+    }
+}
+
+async fn get_snapshot_entry_route(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(server) = state.registry.list_servers().first().copied() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no media server configured" })),
+        );
+    };
+    let Some(client) = state.registry.get_client(&server.id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "media server client unavailable" })),
+        );
+    };
+    match client.get_snapshot_entry(&id).await {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(e) => (e.status, Json(json!({ "error": e.body }))),
+    }
+}
+
+async fn get_snapshot_image_route(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let server = match state.registry.list_servers().first().copied() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(r#"{"error":"no media server configured"}"#),
+            )
+                .into_response();
+        }
+    };
+    let client = match state.registry.get_client(&server.id) {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(r#"{"error":"media server client unavailable"}"#),
+            )
+                .into_response();
+        }
+    };
+    match client.get_snapshot_image_bytes(&id).await {
+        Ok((bytes, content_type)) => {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, content_type)],
+                Bytes::from(bytes),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            (
+                e.status,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(format!(r#"{{"error":"{}"}}"#, e.body).into_bytes()),
+            )
+                .into_response()
+        }
+    }
 }
