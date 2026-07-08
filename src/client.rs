@@ -205,32 +205,6 @@ impl MediaServerClient {
             .await
             .map(|(_, v)| v)
     }
-
-    /// Retrieve the raw JPEG image bytes for a snapshot
-    pub async fn get_snapshot_image_bytes(&self, id: &str) -> Result<(Vec<u8>, String), UpstreamError> {
-        let url = format!("{}/api/snapshots/{}.jpg", self.base_url, url_encode_component(id));
-        let response = self.http.get(&url).send().await.map_err(|err| UpstreamError {
-            status: StatusCode::BAD_GATEWAY,
-            body: format!("cannot reach media server at {}: {err}", self.base_url),
-        })?;
-
-        let status =
-            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("image/jpeg")
-            .to_string();
-        let bytes = response.bytes().await.unwrap_or_default().to_vec();
-
-        if !status.is_success() {
-            let body = String::from_utf8_lossy(&bytes).to_string();
-            return Err(UpstreamError { status, body });
-        }
-
-        Ok((bytes, content_type))
-    }
 }
 
 fn normalize_path(path: &str) -> String {

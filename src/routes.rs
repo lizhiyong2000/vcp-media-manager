@@ -1,8 +1,5 @@
 use axum::{
-    body::Bytes,
     extract::{Path, State},
-    http::header,
-    response::IntoResponse,
     routing::get,
     Json, Router,
 };
@@ -38,10 +35,6 @@ pub fn api_router() -> Router<AppState> {
         .route("/streams", get(list_streams).post(create_stream))
         .route("/streams/:id", get(get_stream).delete(delete_stream))
         .route("/metrics", get(get_metrics))
-        .route("/pull/rtmp", axum::routing::post(pull_rtmp))
-        .route("/pull/rtsp", axum::routing::post(pull_rtsp))
-        .route("/pull/hls", axum::routing::post(pull_hls))
-        .route("/pull/flv", axum::routing::post(pull_flv))
         .route("/play-urls/:id", get(get_play_urls_legacy))
         .route("/transcode/start", axum::routing::post(start_transcode))
         .route("/transcode/stop", axum::routing::post(stop_transcode))
@@ -49,7 +42,6 @@ pub fn api_router() -> Router<AppState> {
         .route("/snapshot", axum::routing::post(capture_snapshot_route))
         .route("/snapshots", get(list_snapshots_route))
         .route("/snapshots/:id", get(get_snapshot_entry_route))
-        .route("/snapshot-image/:snapshot_id", get(get_snapshot_image_route))
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -570,46 +562,6 @@ async fn get_metrics(State(state): State<AppState>) -> (StatusCode, Json<serde_j
     (StatusCode::OK, Json(merged))
 }
 
-async fn pull_rtmp(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
-    route_pull(&state, body, "/api/rtmp/pull").await
-}
-
-async fn pull_hls(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
-    route_pull(&state, body, "/api/pull/hls").await
-}
-
-async fn pull_flv(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
-    route_pull(&state, body, "/api/pull/flv").await
-}
-
-async fn pull_rtsp(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
-    route_pull(&state, body, "/api/rtsp/pull").await
-}
-
-async fn route_pull(
-    state: &AppState,
-    body: serde_json::Value,
-    path: &str,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let stream_id = body
-        .get("stream_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if let Some(device) = state.devices.get(&stream_id).await {
-        if let Some(client) = state.registry.get_client(&device.server_id) {
-            return match client
-                .request_json(axum::http::Method::POST, path, Some(body))
-                .await
-            {
-                Ok((status, value)) => (status, Json(value)),
-                Err(e) => (e.status, Json(json!({ "error": e.body }))),
-            };
-        }
-    }
-    proxy_first_server(state, axum::http::Method::POST, path, Some(body)).await
-}
-
 async fn get_play_urls_legacy(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -915,51 +867,5 @@ async fn get_snapshot_entry_route(
     match client.get_snapshot_entry(&id).await {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(e) => (e.status, Json(json!({ "error": e.body }))),
-    }
-}
-
-async fn get_snapshot_image_route(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let server = match state.registry.list_servers().first().copied() {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from(r#"{"error":"no media server configured"}"#),
-            )
-                .into_response();
-        }
-    };
-    let client = match state.registry.get_client(&server.id) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from(r#"{"error":"media server client unavailable"}"#),
-            )
-                .into_response();
-        }
-    };
-    match client.get_snapshot_image_bytes(&id).await {
-        Ok((bytes, content_type)) => {
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, content_type)],
-                Bytes::from(bytes),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            (
-                e.status,
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from(format!(r#"{{"error":"{}"}}"#, e.body).into_bytes()),
-            )
-                .into_response()
-        }
     }
 }
